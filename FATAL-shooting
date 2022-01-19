@@ -1,0 +1,447 @@
+## *****************************************************************************
+
+## PROGRAMMING WITH R
+
+## FATAL POLICE SHOOTING IN THE U.S. FROM 2015 - 2020
+
+## *****************************************************************************
+
+## *****************************************************************************
+
+## Load packages****************************************************************
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(caret)
+
+## *************************Load data*******************************************
+
+shooting_df <- read.csv(
+  "input/fatal-police-shootings-data.csv",
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA")
+)
+
+## *****************write all functions here************************************
+
+convert_factor <- function(column_name) {
+  column_name <- as.factor(column_name)
+}
+
+## **************explore and analyze data here**********************************
+
+## METHODOLOGY
+
+## DATA CLEANING AND PREPROCESSING
+
+cleaned_shooting_df <- shooting_df %>%
+  select(-c(latitude, longitude, is_geocoding_exact)) %>%
+  mutate_all(. , list( ~ na_if(., ""))) %>%
+  mutate(year = substr(date, start = 1, stop = 4)) %>%
+  mutate(month = substr(date, start = 6, stop = 7)) %>%
+  mutate_at(vars(-c(name, city, state, race)), list(tolower)) %>%
+  mutate(
+    race = recode(
+      race,
+      "A" = "Asian",
+      "B" = "Black",
+      "H" = "Hispanic",
+      "N" = "Native.American",
+      "O" = "Other",
+      "W" = "White"
+    ),
+    gender = recode(gender, "f" = "Female", "m" = "Male"),
+    manner_of_death = gsub('\\s+', '.', manner_of_death),
+    flee = gsub('\\s+', '.', flee),
+    month = recode(
+      month,
+      "01" = "January",
+      "02" = "February",
+      "03" = "March",
+      "04" = "April",
+      "05" = "May",
+      "06" = "June",
+      "07" = "July",
+      "08" = "August",
+      "09" = "September",
+      "10" = "October",
+      "11" = "November",
+      "12" = "December"
+    ),
+  ) %>%
+  mutate_at(
+    vars(
+      gender,
+      race,
+      signs_of_mental_illness,
+      flee,
+      threat_level,
+      body_camera,
+      manner_of_death,
+      armed,
+      year,
+      month
+    ),
+    list(convert_factor)
+  )
+
+## ***************RESULTS*******************************************************
+
+## MODEL 1 DATA VISUALIZATION
+
+## 1.1 Deaths in the US per state
+
+shootings_per_state <- ggplot(cleaned_shooting_df, aes(x = state)) +
+  geom_bar(fill = "black") + ggtitle("Number of deaths per State") +
+  coord_flip() +
+  scale_x_discrete("State") +
+  scale_y_continuous("Number of Deaths") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+shootings_per_state
+
+## 1.2 Deaths per gender, 95% male and 5% female victims > change colors
+
+shooting_per_gender <- cleaned_shooting_df %>%
+  drop_na %>%
+  ggplot(aes(x = gender, fill = gender)) +
+  geom_bar() +
+  ggtitle("Number of deaths per gender") +
+  scale_x_discrete(name = "Gender") +
+  scale_y_continuous(name = "Number of Deaths") +
+  scale_fill_manual(name = "Gender",
+                    values = c("Female" = "black",
+                               "Male" = "yellow2")) +
+  theme(axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5))
+
+shooting_per_gender
+
+## 1.3 Deaths per race from 2015-2020
+
+shootings_per_year <- cleaned_shooting_df %>%
+  group_by(year) %>%
+  count(race) %>%
+  drop_na() %>%
+  ggplot(aes(x = year, y = n, group = race)) +
+  geom_line(aes(color = race)) +
+  ggtitle("Number of deaths per race per year") +
+  scale_color_brewer(palette = "Set2") +
+  scale_x_discrete(name = "Year") +
+  scale_y_continuous(name = "Number of Deaths") +
+  theme(axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5))
+
+shootings_per_year
+
+## 1.4 Number of people being shot and having a weapon
+
+perc_shootings_armed <- cleaned_shooting_df %>%
+  na.omit() %>%
+  mutate(weapon = ifelse(
+    armed == "unarmed",
+    "Unarmed",
+    ifelse(
+      armed == "undetermined",
+      "Unknown",
+      ifelse(armed == "unknwon weapon", "Unknown",
+             "Armed")
+    )
+  )) %>%
+  group_by(manner_of_death) %>%
+  count(weapon) %>%
+  mutate(perc = n / sum(n))
+
+shootings_weapon <- perc_shootings_armed %>%
+  drop_na() %>%
+  ggplot(aes(
+    x = manner_of_death,
+    y = perc,
+    fill = weapon,
+    label = scales::percent(perc)
+  )) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(position = position_dodge(width = .9),
+            vjust = -0.5,
+            size = 3) +
+  ggtitle("Percentage of deaths and weapon possession") +
+  scale_x_discrete(name = "Manner of Death",
+                   labels = c("Shot", "Shot and Tasered")) +
+  scale_y_continuous("Percentage of Deaths", labels = scales::percent) +
+  theme(axis.title.y = element_text(margin = margin(0, 10, 0, 0)),
+        plot.title = element_text(hjust = 0.5)) +
+  scale_fill_brewer("Weapon")
+
+shootings_weapon
+
+## *****************************************************************************
+
+## MODEL 1 LOGISTIC REGRESSION
+
+## ***************LG Research q1************************************************
+
+weapon_df <- cleaned_shooting_df %>%
+  drop_na() %>%
+  mutate(weapon = ifelse(
+    armed == "unarmed",
+    "unarmed",
+    ifelse(
+      armed == "undetermined",
+      "unknown",
+      ifelse(armed == "unknown weapon", "unknown",
+             "armed")
+    )
+  )) %>%
+  mutate_at(vars(weapon), list(convert_factor))
+
+set.seed(1)
+
+trn_weapon_relevel <- weapon_df %>%
+  filter(weapon != "unknown") %>%
+  mutate(weapon = relevel(factor(weapon), ref = "armed")) %>%
+  mutate(gender = relevel(factor(gender), ref = "Male")) %>%
+  mutate(race = relevel(factor(race), ref = "Black"))
+
+trn_index_lgr <-
+  createDataPartition(y = trn_weapon_relevel$weapon, p = 0.60, list = FALSE)
+trn_weapon <- trn_weapon_relevel[trn_index_lgr, ]
+tst_weapon <- trn_weapon_relevel[-trn_index_lgr, ]
+
+## reference group: armed, male, black
+
+set.seed(1)
+weapon_lgr <- train(
+  weapon ~ race + gender,
+  method = "glm",
+  family = binomial(link = "logit"),
+  data = trn_weapon,
+  trControl = trainControl(
+    method = "repeatedcv",
+    repeats = 3,
+    summaryFunction = prSummary,
+    classProbs = TRUE,
+    sampling = "down", ## using down sampling to remove imbalance in the class.
+  ),
+  metric = "AUC"
+)
+
+summary(weapon_lgr)
+
+pred_weapon_lgr <- predict(weapon_lgr, tst_weapon)
+
+cnf_mtrx_lgr <-
+  confusionMatrix(pred_weapon_lgr, as.factor(tst_weapon$weapon))
+cnf_mtrx_lgr
+
+## **********************************RESULTS************************************
+
+## MODEL 2 DATA VISUALIZATION
+
+## 2.1 manner_of_death vs body_camera 
+
+death_manner_data <- cleaned_shooting_df %>%
+  select(-c("id", "name", "city", "state", "date")) %>%
+  group_by(manner_of_death) %>%
+  na.omit()
+
+death_manner_plot <- ggplot(death_manner_data,
+                            aes(x = body_camera, fill = body_camera)) +
+  geom_bar(position = "dodge") +
+  facet_grid( ~ manner_of_death) +
+  theme(plot.title = element_text(size = (11),
+                                  hjust = 0.5)) +
+  ggtitle("Manner of death vs Body Camera") +
+  scale_fill_manual(name = "Body Camera",
+                    values = c("false" = "black",
+                               "true" = "yellow2")) +
+  scale_x_discrete(name = "Body Camera") +
+  scale_y_continuous(name = "Number of Deaths")
+
+death_manner_plot
+
+## *****************************************************************************
+
+## MODEL 2 K NEAREST NEIGHBORS
+
+set.seed(1)
+
+knn_data <- cleaned_shooting_df %>%
+  na.omit() %>%
+  select(-c("id", "name", "city", "state", "date", "month", "year"))
+
+trn_index_knn <-
+  createDataPartition(y = knn_data$manner_of_death,
+                      p = 0.70,
+                      list = FALSE)
+
+train_set <- knn_data[trn_index_knn, ]
+test_set <- knn_data[-trn_index_knn, ]
+
+set.seed(1)
+
+death_manner_knn_model <- train(
+  manner_of_death ~ body_camera,
+  method = "knn",
+  data = train_set,
+  trControl = trainControl(
+    method = "repeatedcv",
+    number = 5,
+    repeats = 3,
+    sampling = "down", ## using down sampling to remove imbalance in the class.
+    returnResamp = "all",
+    classProbs = TRUE
+  )
+)
+
+death_manner_knn_model
+
+pred_death_manner_knn <- predict(death_manner_knn_model, test_set)
+cnf_mtrx_knn <-
+  confusionMatrix(pred_death_manner_knn, as.factor(test_set$manner_of_death))
+cnf_mtrx_knn
+
+## ***************RESULTS*******************************************************
+
+## MODEL 3 DATA VISUALIZATION
+
+## Installing packages
+
+install.packages("DMwR")
+install.packages("usmap")
+install.packages("randomForest")
+install.packages("grid")
+
+## Loading packages
+
+library(DMwR)
+library(usmap)
+library(randomForest)
+library(grid)
+
+## VISUALIZATION OF THE DATA FOR PREPROCESSING
+
+state_no_cam_shot <- cleaned_shooting_df %>%
+  select(manner_of_death, body_camera, state, race) %>%
+  filter(body_camera == "false") %>%
+  group_by(state) %>%
+  na.omit() %>%
+  summarise(No.of.Encounters.Without.Camera = n())
+
+state_with_cam_shot <- cleaned_shooting_df %>%
+  select(manner_of_death, body_camera, state, race) %>%
+  filter(body_camera == "true") %>%
+  group_by(state) %>%
+  na.omit() %>%
+  summarise(No.of.Encounters.With.Camera = n())
+
+
+## 3.1 Death density when body_camera is not present
+
+state_no_cam_plot_data <- plot_usmap(
+  data = state_no_cam_shot,
+  values = "No.of.Encounters.Without.Camera",
+  color = "red" ,
+  labels = TRUE
+) +
+  scale_fill_continuous(low = "light yellow",
+                        high = "red",
+                        name = "Death count") +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = (15),
+                              hjust = 0.5),
+    legend.title = element_text(size = (12))
+  ) +
+  ggtitle("Death density when body camera is not present")
+
+state_no_cam_plot_data
+
+## 3.2 Death density when body_camera is present
+
+state_with_cam_plot_data <- plot_usmap(
+  data = state_with_cam_shot,
+  values = "No.of.Encounters.With.Camera",
+  color = "red" ,
+  labels = TRUE
+) +
+  scale_fill_continuous(low = "light yellow",
+                        high = "brown",
+                        name = "Death count") +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(size = (15),
+                              hjust = 0.5),
+    legend.title = element_text(size = (12))
+  ) +
+  ggtitle("Death density when body camera is present")
+
+state_with_cam_plot_data
+
+## *****************************************************************************
+
+## MODEL 3 RANDOM FOREST
+
+## body_camera vs armed
+
+random_forest_data <- cleaned_shooting_df %>%
+  select(body_camera,
+         armed,
+         threat_level,
+         flee,
+         signs_of_mental_illness) %>%
+  mutate(armed = ifelse(
+    armed == "unarmed",
+    "unarmed",
+    ifelse(
+      armed == "undetermined",
+      "unknown",
+      ifelse(armed == "unknown weapon", "unknown",
+             "armed")
+    )
+  )) %>%
+  na.omit()
+
+set.seed(1)
+train_index_rf <-
+  createDataPartition(y = random_forest_data$body_camera,
+                      p = 0.70,
+                      list = FALSE)
+
+train_set_rf <- random_forest_data[train_index_rf, ]
+test_set_rf <- random_forest_data[-train_index_rf, ]
+
+table(train_set_rf$body_camera)
+nmin <- sum(train_set_rf$body_camera == "true")
+
+set.seed(1)
+
+ctrl <- trainControl(
+  method = "cv",
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  sampling = "smote" ## using smote to remove imbalance in the class.
+)
+
+death_manner_rf_model <- train(
+  body_camera ~ .,
+  data = train_set_rf,
+  method = "rf",
+  ntree = 1500,
+  metric = "ROC",
+  strata = train_set_rf$body_camera,
+  tuneLength = 5,
+  trControl = ctrl,
+  sampsize = rep(nmin, 2)
+)
+
+death_manner_rf_model
+
+pred_cam_rf <- predict(death_manner_rf_model, test_set_rf)
+
+cnf_mtrx_rf <-
+  confusionMatrix(pred_cam_rf, as.factor(test_set_rf$body_camera))
+
+cnf_mtrx_rf
+
+## *****************************************************************************
